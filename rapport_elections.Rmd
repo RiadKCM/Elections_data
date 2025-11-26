@@ -1,0 +1,287 @@
+---
+title: "Projet DATAMINING M2 MIAGE — Analyse élections 2017 (1er tour)"
+author: "Arezki BAZIZI & Riad KACEM"
+date: "24/11/2025"
+output:
+pdf_document:
+toc: true
+number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+echo = FALSE,          # N'affiche PAS le code R
+warning = FALSE,       # N'affiche PAS les avertissements
+message = FALSE,       # N'affiche PAS les messages
+fig.width=8,
+fig.height=5
+)
+
+# Chargement des librairies nécessaires
+library(tidyverse)
+library(readr)
+library(FactoMineR)
+library(factoextra)
+library(cluster)
+library(sf)
+library(ggplot2)
+library(knitr)
+                                           
+set.seed(123)
+```
+                                           
+# Introduction
+                                           
+Ce rapport applique les méthodes d’**Analyse en Composantes Principales (ACP)** et de **classification non supervisée** (k-means et CAH) aux résultats du **1er tour 2017** de l'élection présidentielle, au **niveau départemental**.
+
+**Questions étudiées :**
+
+  * Quelles dimensions principales expliquent la variabilité électorale entre départements ?
+  * Peut-on regrouper les départements en profils homogènes de comportement électoral ?
+  * Où sont géographiquement situés les clusters ?
+
+-----
+
+# 1\. Chargement et préparation des données
+
+```{r load-data}
+input_file <- "Election2017_Tour1.csv"
+if(!file.exists(input_file)) stop("Placez 'Election2017_Tour1.csv' dans le dossier du projet.")
+if(!file.exists("departements.geojson")) stop("Placez 'departements.geojson' (GeoJSON des départements français) dans le dossier du projet.")
+
+df_raw <- read_delim(input_file, delim = ";", locale = locale(encoding = "ISO-8859-1"), trim_ws = TRUE, guess_max=10000)
+names(df_raw) <- str_replace_all(names(df_raw), "\\s+", "_")
+```
+
+## 1.1 Nettoyage et conversion numérique
+
+```{r clean}
+clean_num <- function(x){
+  x <- as.character(x)
+  x <- str_replace_all(x, "%", "")
+  x <- str_replace_all(x, "\\s+", "")
+  x <- str_replace_all(x, ",", ".")
+  x[x==""] <- NA
+  as.numeric(x)
+}
+
+df <- df_raw
+totals_expected <- c("Inscrits","Abstentions","Votants","Blancs","Nuls","Exprimes")
+for(col in intersect(totals_expected, names(df))) df[[col]] <- clean_num(df[[col]])
+
+pct_cols <- names(df)[str_detect(names(df), "^%")]
+for(c in pct_cols) df[[c]] <- clean_num(df[[c]])
+
+if(!"Inscrits" %in% names(df)) stop("La colonne Inscrits est requise.")
+```
+
+-----
+
+# 2\. Agrégation par département
+
+L'agrégation est réalisée en calculant les pourcentages par département via une **moyenne pondérée par le nombre d'inscrits** de chaque commune.
+
+```{r agg}
+dept_code_col <- names(df)[str_detect(names(df), "Code.du.departement")][1]
+dept_name_col <- names(df)[str_detect(names(df), "Libelle.du.departement")][1]
+
+# 1. Sommes des totaux
+agg_dept <- df %>%
+  group_by(!!sym(dept_code_col), !!sym(dept_name_col)) %>%
+  summarise(
+    Inscrits = sum(Inscrits, na.rm=TRUE),
+    Abstentions = if("Abstentions" %in% names(df)) sum(Abstentions, na.rm=TRUE) else NA_real_,
+    Votants = if("Votants" %in% names(df)) sum(Votants, na.rm=TRUE) else NA_real_,
+    Blancs = if("Blancs" %in% names(df)) sum(Blancs, na.rm=TRUE) else NA_real_,
+    Nuls = if("Nuls" %in% names(df)) sum(Nuls, na.rm=TRUE) else NA_real_,
+    Exprimes = if("Exprimes" %in% names(df)) sum(Exprimes, na.rm=TRUE) else NA_real_,
+    .groups = "drop"
+  )
+
+# 2. Fonction de calcul des pourcentages pondérés
+weighted_pct <- function(df, var, group_cols){
+  df %>% mutate(.w = (!!sym(var) / 100) * Inscrits) %>%
+    group_by(across(all_of(group_cols))) %>%
+    summarise(wpct = sum(.w, na.rm=TRUE) / sum(Inscrits, na.rm=TRUE) * 100, .groups = "drop") %>%
+    pull(wpct)
+}
+
+group_cols <- c(dept_code_col, dept_name_col)
+for(cn in pct_cols) agg_dept[[paste0("Pct_", cn)]] <- weighted_pct(df, cn, group_cols)
+
+knitr::kable(head(agg_dept, 10), caption = "Aperçu de l'agrégation par département")
+```
+
+-----
+
+# 3\. Analyse descriptive
+
+```{r descriptif}
+pct_dept_cols <- names(agg_dept)[str_detect(names(agg_dept), "^Pct_")]
+
+desc_stats <- agg_dept %>% 
+  select(all_of(c("Inscrits", pct_dept_cols))) %>%
+  summarise(across(everything(), list(mean = ~mean(.x, na.rm=TRUE), sd = ~sd(.x, na.rm=TRUE))))
+
+knitr::kable(desc_stats, caption = "Statistiques descriptives des variables (moyenne et écart-type par département)")
+```
+
+### Histogramme et boxplot de l'abstention
+
+```{r histo-box}
+# Histogramme abstentions
+p_histo <- ggplot(agg_dept, aes(x = `Pct_%Abs.Ins`)) + # <--- Utilisez ` ` ici
+  geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
+  labs(title = "Histogramme des abstentions par département", x = "% Abstentions", y = "Nombre de départements") +
+  theme_minimal()
+
+# Boxplot
+p_box <- ggplot(agg_dept, aes(y = `Pct_%Abs.Ins`)) + # <--- Et ici
+  geom_boxplot(fill = "lightgreen", color = "black") +
+  labs(title = "Boxplot des abstentions par département", y = "% Abstentions") +
+  theme_minimal()
+
+# Affichage des figures
+print(p_histo)
+print(p_box)
+
+# Sauvegarde des figures
+ggsave("histo_abstention.png", plot = p_histo, width = 8, height = 5)
+ggsave("boxplot_abstention.png", plot = p_box, width = 4, height = 5)
+```
+
+-----
+
+# 4\. ACP
+
+```{r pca-figures}
+# Préparation des données pour l'ACP 
+X <- agg_dept %>% 
+  select(all_of(pct_dept_cols)) %>%
+  mutate(across(everything(), as.numeric)) %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm=TRUE), .))) 
+
+res.pca <- PCA(X, scale.unit = TRUE, graph = FALSE)
+pc_scores <- res.pca$ind$coord
+
+# Figures ACP
+p_eig <- fviz_eig(res.pca, addlabels = TRUE, main = "Variance expliquée par composante principale")
+p_var <- fviz_pca_var(res.pca, col.var = "contrib", repel = TRUE, 
+                      gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+title = "Cercle des corrélations (Contribution des variables)")
+p_ind <- fviz_pca_ind(res.pca, label = "all", repel = TRUE, title = "Projection des départements (Individus)")
+
+# Affichage des figures (Utilisation explicite de print() pour garantir l'affichage)
+print(p_eig)
+print(p_var)
+print(p_ind)
+
+# Sauvegarde des figures ACP
+ggsave("pca_eboulis.png", plot = p_eig, width = 8, height = 5)
+ggsave("pca_variables.png", plot = p_var, width = 8, height = 5)
+ggsave("pca_individus.png", plot = p_ind, width = 8, height = 5)
+```
+
+-----
+  
+  # 5\. Classification non supervisée
+  
+  La classification est basée sur les **4 premières composantes principales**.
+
+```{r clustering}
+nb_pc <- 4 
+pcs <- pc_scores[,1:nb_pc]
+
+## Détermination du nombre optimal de clusters K (Méthode de la Silhouette)
+sil <- sapply(2:8, function(k){ 
+  set.seed(123); 
+  km <- kmeans(pcs, centers=k, nstart=30); 
+  mean(silhouette(km$cluster, dist(pcs))[,3]) 
+})
+best_k <- which.max(sil) + 1
+cat(paste("Le nombre optimal de clusters (Silhouette) est :", best_k, "\n"))
+
+
+## K-means final
+set.seed(123)
+km_final <- kmeans(pcs, centers = best_k, nstart = 100)
+agg_dept$cluster_km <- km_final$cluster
+
+## Profils des clusters (K-means)
+profiles_km <- agg_dept %>% 
+  group_by(cluster_km) %>% 
+  summarise(across(all_of(pct_dept_cols), ~ round(mean(.x, na.rm=TRUE), 2)), n = n())
+
+knitr::kable(profiles_km, caption = paste("Profils moyens des", best_k, "clusters (K-means)"))
+
+
+## Classification Ascendante Hiérarchique (CAH)
+hc <- hclust(dist(pcs), method = "ward.D2")
+plot(hc, hang = -1, labels = FALSE, main = "Dendrogramme de la CAH (méthode Ward.D2)")
+rect.hclust(hc, k = best_k, border = 2:best_k)
+
+# Comparaison des résultats
+agg_dept$cluster_hc <- cutree(hc, k = best_k)
+knitr::kable(table(Cluster_Kmeans = agg_dept$cluster_km, Cluster_CAH = agg_dept$cluster_hc), 
+             caption = paste("Comparaison K-means vs. CAH (k=", best_k, ")"))
+```
+
+-----
+  
+  # 6\. Carte choroplèthe
+  
+  Visualisation géographique des clusters identifiés par la méthode K-means.
+
+```{r map}
+shp_path <- "departements.geojson"
+
+dep_sf <- st_read(shp_path, quiet = TRUE)
+agg_join <- agg_dept %>% mutate(Code_num = as.character(!!sym(dept_code_col)))
+
+# Harmonisation du code département pour le join
+dep_sf <- dep_sf %>% 
+  mutate(code_dep = as.character(
+    ifelse(!is.na(code), code, 
+           ifelse(!is.na(INSEE_DEP), INSEE_DEP, NA)))) 
+
+dep_map <- dep_sf %>% 
+  left_join(agg_join, by = c("code_dep" = "Code_num")) %>%
+  filter(!is.na(cluster_km)) 
+
+p_map <- ggplot(dep_map) +
+  geom_sf(aes(fill = factor(cluster_km)), color = "grey40", size = 0.1) +
+  scale_fill_brewer(type = "qual", palette = "Set2", na.value = "grey90", name = "Cluster K-means") +
+  labs(title = "Clusters électoraux — 1er tour 2017 (par département)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Affichage de la carte
+print(p_map)
+
+# Sauvegarde de la carte
+ggsave("carte_clusters.png", plot = p_map, width = 8, height = 8)
+```
+
+-----
+  
+  # 7\. Conclusion
+  
+  *(Note : Remplacez les placeholders ci-dessous par votre analyse concrète des figures et des tableaux obtenus.)*
+  
+  * L'ACP met en évidence **[X]** dimensions expliquant **[Y%]** de la variance. La première dimension principale correspond typiquement à **[Décrire le contraste électoral sur l'Axe 1]**.
+* La classification identifie **`r best_k`** groupes de départements avec des profils électoraux distincts, comme le montrent les profils moyens du Tableau 5.
+* **Le Cluster 1** est caractérisé par **[Décrire le profil électoral]**.
+* **Le Cluster 2** est caractérisé par **[Décrire le profil électoral]**.
+* **Limites** : L'interprétation est limitée par l'agrégation départementale et l'absence de variables socio-économiques pour expliquer la formation des clusters.
+
+-----
+
+# 8\. Annexes
+
+  * Fichier `.Rmd` : code source utilisé.
+  * Fichiers produits : Figures PNG sauvegardées dans le répertoire de travail.
+
+<!-- end list -->
+
+```
+```
