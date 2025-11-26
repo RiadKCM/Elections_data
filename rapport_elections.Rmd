@@ -4,7 +4,6 @@ author: "Arezki BAZIZI & Riad KACEM"
 date: "24/11/2025"
 output:
 pdf_document:
-toc: true
 number_sections: true
 ---
 
@@ -34,11 +33,15 @@ set.seed(123)
                                            
 Ce rapport applique les méthodes d’**Analyse en Composantes Principales (ACP)** et de **classification non supervisée** (k-means et CAH) aux résultats du **1er tour 2017** de l'élection présidentielle, au **niveau départemental**.
 
-**Questions étudiées :**
+**Objectifs :**
 
-  * Quelles dimensions principales expliquent la variabilité électorale entre départements ?
-  * Peut-on regrouper les départements en profils homogènes de comportement électoral ?
-  * Où sont géographiquement situés les clusters ?
+ • Produire une synthèse descriptive des résultats au niveau départemental (agrégation pondérée par le nombre d’inscrits).
+
+ • Calculer une ACP normée sur les pourcentages départementaux pour extraire les axes structurants.
+
+ • Produire une classification non supervisée (K-means et CAH) pour faire émerger des profils départementaux.
+
+ • Cartographier les clusters sur une carte choroplèthe des départements.
 
 -----
 
@@ -155,36 +158,61 @@ ggsave("boxplot_abstention.png", plot = p_box, width = 4, height = 5)
 # 4\. ACP
 
 ```{r pca-figures}
-# Préparation des données pour l'ACP 
-X <- agg_dept %>% 
-  select(all_of(pct_dept_cols)) %>%
-  mutate(across(everything(), as.numeric)) %>%
-  mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm=TRUE), .))) 
+# Préparation des données pour l'ACP
+X <- agg_dept %>%
+ select(all_of(pct_dept_cols)) %>%
+ mutate(across(everything(), as.numeric)) %>%
+ mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm=TRUE), .)))
 
 res.pca <- PCA(X, scale.unit = TRUE, graph = FALSE)
 pc_scores <- res.pca$ind$coord
 
+# Valeurs clés ACP (pour interprétation inline)
+pc1 <- round(res.pca$eig[1,2], 1)
+pc2 <- round(res.pca$eig[2,2], 1)
+pc12_cum <- round(sum(res.pca$eig[1:2,2]), 1)
+ 
+top_var_pc1 <- names(sort(res.pca$var$contrib[,1], decreasing = TRUE))[1:5]
+top_var_pc2 <- names(sort(res.pca$var$contrib[,2], decreasing = TRUE))[1:5]
+# --------------------------------------------------------------------------
+
 # Figures ACP
-p_eig <- fviz_eig(res.pca, addlabels = TRUE, main = "Variance expliquée par composante principale")
+p_eig <- fviz_eig(res.pca, addlabels = TRUE, main = "Variance expliquée par composante principale") 
 p_var <- fviz_pca_var(res.pca, col.var = "contrib", repel = TRUE, 
                       gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-title = "Cercle des corrélations (Contribution des variables)")
+                      title = "Cercle des corrélations (Contribution des variables)") 
 p_ind <- fviz_pca_ind(res.pca, label = "all", repel = TRUE, title = "Projection des départements (Individus)")
-
-# Affichage des figures (Utilisation explicite de print() pour garantir l'affichage)
+ 
+# Affichage des figures
 print(p_eig)
 print(p_var)
 print(p_ind)
-
+ 
 # Sauvegarde des figures ACP
 ggsave("pca_eboulis.png", plot = p_eig, width = 8, height = 5)
 ggsave("pca_variables.png", plot = p_var, width = 8, height = 5)
 ggsave("pca_individus.png", plot = p_ind, width = 8, height = 5)
+
 ```
+
+**Interprétation (ACP)**
+L’ACP normée a été réalisée sur les pourcentages départementaux. Les deux premiers axes expliquent ensemble r pc12_cum% de l’inertie (PC1 = r pc1%, PC2 = r pc2%).
+
+Axe 1 (PC1) : L'opposition Structurelle
+PC1 est l'axe majeur. Il oppose typiquement les départements où les variables r top_var_pc1[1] et r top_var_pc1[2] sont fortes à ceux où r top_var_pc1[4] et r top_var_pc1[5] dominent. L'interprétation classique est l'opposition Système vs. Anti-Système et/ou Vote de Mobilisation vs. Abstention/Vote Protestataire.
+
+Conclusion : Cet axe résume la fracture électorale historique, polarisant le territoire entre les régions participant à la dynamique du scrutin et celles exprimant un rejet ou une distance.
+
+Axe 2 (PC2) : La Clivage Résiduel
+PC2 est indépendant du premier et met en évidence la distinction restante.
+
+Il est principalement porté par les variables r top_var_pc2[1] et r top_var_pc2[2]. L'interprétation classique est le clivage Gauche Radicale/Protestataire (si Mélenchon/Hamon dominent un côté) vs. Droite Modérée/Conservatrice (si Fillon/Dupont-Aignan dominent l'autre côté).
+
+
 
 -----
   
-  # 5\. Classification non supervisée
+# 5\. Classification non supervisée
   
   La classification est basée sur les **4 premières composantes principales**.
 
@@ -264,15 +292,33 @@ ggsave("carte_clusters.png", plot = p_map, width = 8, height = 8)
 
 -----
   
-  # 7\. Conclusion
+# 7\. Conclusion
   
-  *(Note : Remplacez les placeholders ci-dessous par votre analyse concrète des figures et des tableaux obtenus.)*
-  
-  * L'ACP met en évidence **[X]** dimensions expliquant **[Y%]** de la variance. La première dimension principale correspond typiquement à **[Décrire le contraste électoral sur l'Axe 1]**.
-* La classification identifie **`r best_k`** groupes de départements avec des profils électoraux distincts, comme le montrent les profils moyens du Tableau 5.
-* **Le Cluster 1** est caractérisé par **[Décrire le profil électoral]**.
-* **Le Cluster 2** est caractérisé par **[Décrire le profil électoral]**.
-* **Limites** : L'interprétation est limitée par l'agrégation départementale et l'absence de variables socio-économiques pour expliquer la formation des clusters.
+Synthèse des Principaux Résultats
+Ce projet d'exploration des données électorales du premier tour de l'élection présidentielle de 2017, agrégées au niveau départemental, a permis d'atteindre les objectifs fixés :
+
+Synthèse ACP : L'Analyse en Composantes Principales (ACP) a réussi à réduire la complexité des données. Les deux premiers axes principaux (PC1 et PC2) expliquent conjointement r pc12_cum% de la variance totale des pourcentages de vote départementaux. Ces axes capturent les grandes lignes de l'opposition électorale française : l'opposition structurante Système/Anti-Système (PC1) et le clivage Résiduel Gauche/Droite (PC2).
+
+Synthèse Classification : La classification non supervisée par K-means a identifié r best_k profils départementaux distincts (Tableau 1). Cette typologie fournit une cartographie des comportements électoraux français, révélant des groupes homogènes (par exemple, des départements à forte abstention, à forte concentration centriste, ou fortement orientés vers les extrêmes).
+
+Synthèse Géographique : La carte choroplèthe des clusters confirme que les profils électoraux s'organisent selon des logiques spatiales claires, indiquant l'influence du contexte local (socio-démographie, économie régionale) sur le vote.
+
+Limites du Projet et Perspectives
+Limites
+L'analyse présentée est sujette à plusieurs limites inhérentes au jeu de données et à la méthodologie :
+
+Agrégation Départementale : L'utilisation de données agrégées au niveau départemental entraîne une perte de détail communal et masque l'hétérogénéité interne des grands départements (effet de moyenne).
+
+Variables Explicatives Manquantes : L'interprétation est purement électorale. L'absence d'intégration de variables socio-économiques externes (âge, diplôme, revenu, taux de chômage, etc.) limite la capacité à expliquer les causes profondes de la formation des clusters.
+
+Traitement des NA : Le choix de l'imputation par la moyenne simple pour les valeurs manquantes introduit une simplicité qui peut légèrement biaiser la variance des variables.
+
+Perspectives
+Pour enrichir et valider les résultats, les pistes suivantes sont recommandées :
+
+Enrichissement des Données : Intégrer des indicateurs socio-économiques de l'INSEE par département. Cela permettrait d'effectuer une analyse de corrélation (ACP) enrichie et de nommer les clusters de manière plus pertinente (par exemple, "Cluster à forte abstention, faible revenu moyen").
+
+Méthodes Alternatives : Si des variables catégorielles (ex. statut urbain/rural) devaient être ajoutées, l'utilisation d'une Analyse Factorielle des Correspondances Multiples (AFCM) serait plus appropriée que l'ACP classique pour étudier les relations entre les catégories.
 
 -----
 
@@ -280,8 +326,6 @@ ggsave("carte_clusters.png", plot = p_map, width = 8, height = 8)
 
   * Fichier `.Rmd` : code source utilisé.
   * Fichiers produits : Figures PNG sauvegardées dans le répertoire de travail.
+  * Données : Les fichiers Election2017_Tour1.csv, departements.geojson et elections_dept_agg_dept.csv sont joints.
 
 <!-- end list -->
-
-```
-```
