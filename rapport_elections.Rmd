@@ -3,8 +3,8 @@ title: "Projet DATAMINING M2 MIAGE — Analyse élections 2017 (1er tour)"
 author: "Arezki BAZIZI & Riad KACEM"
 date: "24/11/2025"
 output:
-pdf_document:
-number_sections: true
+  pdf_document:
+    number_sections: true
 ---
 
 ```{r setup, include=FALSE}
@@ -46,7 +46,9 @@ Ce rapport applique les méthodes d’**Analyse en Composantes Principales (ACP)
 
 -----
 
-# 1\. Chargement et préparation des données
+# Chargement et préparation des données
+
+Cette première phase consiste à importer et à rendre exploitables les données brutes.
 
 ```{r load-data}
 input_file <- "Election2017_Tour1.csv"
@@ -57,7 +59,15 @@ df_raw <- read_delim(input_file, delim = ";", locale = locale(encoding = "ISO-88
 names(df_raw) <- str_replace_all(names(df_raw), "\\s+", "_")
 ```
 
-## 1.1 Nettoyage et conversion numérique
+
+## Nettoyage et conversion numérique
+
+Les données brutes comportant des formatages textuels (virgules décimales, symboles `%`, espaces insécables), une fonction de nettoyage dédiée (`clean_num`) a été implémentée. Elle assure :
+ • La conversion des virgules en points décimaux.
+ • La suppression des symboles non numériques.
+ • La transformation des chaînes de caractères en valeurs numériques (`numeric`).
+
+Cette fonction est appliquée systématiquement aux colonnes de totaux (Inscrits, Votants, etc.) ainsi qu'aux colonnes de pourcentages des candidats.
 
 ```{r clean}
 clean_num <- function(x){
@@ -79,96 +89,179 @@ for(c in pct_cols) df[[c]] <- clean_num(df[[c]])
 if(!"Inscrits" %in% names(df)) stop("La colonne Inscrits est requise.")
 ```
 
+
 -----
 
-# 2\. Agrégation par département
+# Agrégation par département
 
 L'agrégation est réalisée en calculant les pourcentages par département via une **moyenne pondérée par le nombre d'inscrits** de chaque commune.
 
 ```{r agg}
-dept_code_col <- names(df)[str_detect(names(df), "Code.du.departement")][1]
-dept_name_col <- names(df)[str_detect(names(df), "Libelle.du.departement")][1]
+# --- 1. IDENTIFICATION DES VARIABLES ---
+col_dep_code <- names(df)[1] # Code.du.departement
+col_dep_lib  <- names(df)[2] # Libelle.du.departement
 
-# 1. Sommes des totaux
+# Colonnes de totaux (à sommer)
+cols_totaux <- c("Inscrits", "Abstentions", "Votants", "Blancs", "Nuls", "Exprimes")
+
+# Colonnes à EXCLURE des calculs de moyenne (Totaux + Identifiants communes)
+cols_exclues <- c(cols_totaux, "Code.de.la.commune", "Libelle.de.la.commune", col_dep_code, col_dep_lib)
+
+# Colonnes Candidats : toutes les numériques SAUF les exclues et les % déjà existants
+cols_candidats <- names(df)[sapply(df, is.numeric)]
+cols_candidats <- setdiff(cols_candidats, cols_exclues)
+cols_candidats <- cols_candidats[!str_detect(cols_candidats, "%")]
+
+# --- 2. CALCUL DE L'AGRÉGATION ---
 agg_dept <- df %>%
-  group_by(!!sym(dept_code_col), !!sym(dept_name_col)) %>%
+  group_by(!!sym(col_dep_code), !!sym(col_dep_lib)) %>%
   summarise(
-    Inscrits = sum(Inscrits, na.rm=TRUE),
-    Abstentions = if("Abstentions" %in% names(df)) sum(Abstentions, na.rm=TRUE) else NA_real_,
-    Votants = if("Votants" %in% names(df)) sum(Votants, na.rm=TRUE) else NA_real_,
-    Blancs = if("Blancs" %in% names(df)) sum(Blancs, na.rm=TRUE) else NA_real_,
-    Nuls = if("Nuls" %in% names(df)) sum(Nuls, na.rm=TRUE) else NA_real_,
-    Exprimes = if("Exprimes" %in% names(df)) sum(Exprimes, na.rm=TRUE) else NA_real_,
+    # A. D'ABORD les moyennes pondérées (Tant que 'Exprimes' est encore détaillé par commune)
+    across(all_of(cols_candidats), ~ weighted.mean(.x, w = Exprimes, na.rm = TRUE)),
+    
+    # B. ENSUITE les sommes (Cela écrase 'Exprimes' avec le total départemental)
+    across(any_of(cols_totaux), sum, na.rm = TRUE),
+    
     .groups = "drop"
   )
 
-# 2. Fonction de calcul des pourcentages pondérés
-weighted_pct <- function(df, var, group_cols){
-  df %>% mutate(.w = (!!sym(var) / 100) * Inscrits) %>%
-    group_by(across(all_of(group_cols))) %>%
-    summarise(wpct = sum(.w, na.rm=TRUE) / sum(Inscrits, na.rm=TRUE) * 100, .groups = "drop") %>%
-    pull(wpct)
-}
+# --- 3. RECALCUL DES POURCENTAGES & RENOMMAGE ---
+agg_dept <- agg_dept %>%
+  mutate(
+    `Pct_%Abs.Ins`    = (Abstentions / Inscrits) * 100,
+    `Pct_%Vot.Ins`    = (Votants / Inscrits) * 100,
+    `Pct_%Exp.Ins`    = (Exprimes / Inscrits) * 100,
+    `Pct_%Exp.Vot`    = (Exprimes / Votants) * 100,
+    `Pct_%Blancs.Ins` = (Blancs / Inscrits) * 100,
+    `Pct_%Blancs.Vot` = (Blancs / Votants) * 100,
+    `Pct_%Nuls.Ins`   = (Nuls / Inscrits) * 100,
+    `Pct_%Nuls.Vot`   = (Nuls / Votants) * 100
+  ) %>%
+  # On ajoute le préfixe "Pct_" aux candidats pour que l'ACP les détecte plus tard
+  rename_with(~ paste0("Pct_", .), all_of(cols_candidats))
 
-group_cols <- c(dept_code_col, dept_name_col)
-for(cn in pct_cols) agg_dept[[paste0("Pct_", cn)]] <- weighted_pct(df, cn, group_cols)
 
-knitr::kable(head(agg_dept, 10), caption = "Aperçu de l'agrégation par département")
+# --- 4. AFFICHAGE DU TABLEAU PROPRE POUR LE PDF ---
+tableau_propre <- agg_dept %>%
+  select(
+    Departement      = !!sym(col_dep_lib),
+    Inscrits         = Inscrits,
+    `Abstention (%)` = `Pct_%Abs.Ins`,
+    `Macron (%)`     = `Pct_MACRON_Emmanuel`,
+    `Le Pen (%)`     = `Pct_LE_PEN_Marine`,
+    `Fillon (%)`     = `Pct_FILLON_Francois`,
+    `Mélenchon (%)`  = `Pct_MELENCHON_Jean-Luc`
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% # Arrondi à 2 chiffres
+  arrange(as.numeric(agg_dept[[col_dep_code]])) %>%    # Tri par code dept
+  head(10)                                             # Top 10 seulement
+
+knitr::kable(
+  tableau_propre, 
+  caption = "Synthèse des résultats : Abstention et principaux candidats (Top 10 départements)",
+  align = c('l', 'r', 'c', 'c', 'c', 'c', 'c')
+)
 ```
 
 -----
 
-# 3\. Analyse descriptive
+# Analyse descriptive
+
+Cette étape permet d'étudier la **tendance centrale** (moyenne, médiane) et la **dispersion** (écart-type, étendue) de chaque candidat et des taux de participation à l'échelle départementale.
 
 ```{r descriptif}
-pct_dept_cols <- names(agg_dept)[str_detect(names(agg_dept), "^Pct_")]
+# 1. Sélection : On prend les colonnes "Pct_" MAIS on retire celles qui contiennent un "%"
+# (car Pct_%Abs.Ins contient un %, alors que Pct_MACRON n'en contient pas)
+vars_candidats <- names(agg_dept)[str_detect(names(agg_dept), "^Pct_") & !str_detect(names(agg_dept), "%")]
 
-desc_stats <- agg_dept %>% 
-  select(all_of(c("Inscrits", pct_dept_cols))) %>%
-  summarise(across(everything(), list(mean = ~mean(.x, na.rm=TRUE), sd = ~sd(.x, na.rm=TRUE))))
+# 2. Calcul des statistiques descriptives
+desc_stats <- agg_dept %>%
+  select(all_of(vars_candidats)) %>%
+  pivot_longer(cols = everything(), names_to = "Candidat", values_to = "Score") %>%
+  group_by(Candidat) %>%
+  summarise(
+    Moyenne   = mean(Score, na.rm = TRUE),
+    EcartType = sd(Score, na.rm = TRUE),
+    Min       = min(Score, na.rm = TRUE),
+    Mediane   = median(Score, na.rm = TRUE),
+    Max       = max(Score, na.rm = TRUE)
+  ) %>%
+  # 3. Nettoyage des noms (On enlève "Pct_" et les tirets bas)
+  mutate(Candidat = str_remove(Candidat, "Pct_")) %>%
+  mutate(Candidat = str_replace_all(Candidat, "_", " ")) %>%
+  # 4. Tri par score moyen décroissant
+  arrange(desc(Moyenne))
 
-knitr::kable(desc_stats, caption = "Statistiques descriptives des variables (moyenne et écart-type par département)")
+# 3. Affichage
+knitr::kable(desc_stats, digits = 2, 
+             caption = "Statistiques des scores des candidats par département (en % des exprimés)")
 ```
 
-### Histogramme et boxplot de l'abstention
+## Histogramme de l'abstention
 
-```{r histo-box}
-# Histogramme abstentions
-p_histo <- ggplot(agg_dept, aes(x = `Pct_%Abs.Ins`)) + # <--- Utilisez ` ` ici
-  geom_histogram(binwidth = 2, fill = "steelblue", color = "black") +
-  labs(title = "Histogramme des abstentions par département", x = "% Abstentions", y = "Nombre de départements") +
-  theme_minimal()
+L'histogramme révèle généralement une distribution relativement symétrique. Cela indique que la majorité des départements se concentrent autour d'une moyenne nationale (le pic de la courbe), tandis que les départements à très forte ou très faible participation sont rares. C'est un indicateur de l'homogénéité relative du comportement électoral sur le territoire métropolitain.
 
-# Boxplot
-p_box <- ggplot(agg_dept, aes(y = `Pct_%Abs.Ins`)) + # <--- Et ici
-  geom_boxplot(fill = "lightgreen", color = "black") +
-  labs(title = "Boxplot des abstentions par département", y = "% Abstentions") +
-  theme_minimal()
+```{r histo}
+# Histogramme des abstentions
+p_histo <- ggplot(agg_dept, aes(x = `Pct_%Abs.Ins`)) +
+  geom_histogram(binwidth = 1.5, fill = "#4682B4", color = "white", alpha=0.9) +
+  labs(title = "Distribution du taux d'abstention par département",
+       subtitle = "Présidentielle 2017 (1er tour)",
+       x = "Taux d'abstention (%)",
+       y = "Nombre de départements") +
+  theme_minimal() +
+  theme(plot.title = element_text(face="bold"))
 
-# Affichage des figures
+# Affichage et sauvegarde
 print(p_histo)
-print(p_box)
-
-# Sauvegarde des figures
 ggsave("histo_abstention.png", plot = p_histo, width = 8, height = 5)
-ggsave("boxplot_abstention.png", plot = p_box, width = 4, height = 5)
 ```
 
+# Boxplot de l'abstention
+
+Le boxplot permet de visualiser la médiane (trait central) et l'écart interquartile (la hauteur de la boîte, contenant 50% des départements).
+
+Si la boîte est écrasée, les départements sont très homogènes.
+
+Les points situés au-delà des "moustaches" (en haut ou en bas) signalent des départements atypiques (souvent les territoires d'Outre-mer ou la Corse qui ont des taux d'abstention structurellement différents de la métropole). Ces outliers sont importants à identifier avant une ACP car ils peuvent déformer les axes.
+
+```{r box}
+# Boxplot des abstentions
+p_box <- ggplot(agg_dept, aes(y = `Pct_%Abs.Ins`)) +
+  geom_boxplot(fill = "#90EE90", color = "#2F4F4F", outlier.colour = "red", outlier.shape = 1) +
+  labs(title = "Dispersion de l'abstention (Boxplot)",
+       subtitle = "Identification des valeurs médianes et atypiques",
+       y = "Taux d'abstention (%)",
+       x = "") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(face="bold"))
+
+# Affichage et sauvegarde
+print(p_box)
+ggsave("boxplot_abstention.png", plot = p_box, width = 5, height = 6)
+```
+ 
 -----
 
-# 4\. ACP
+# ACP
 
 ```{r pca-figures}
-# Préparation des données pour l'ACP
+# --- 1. Préparation des données ---
+# On redéfinit la liste des colonnes (ce qui manquait et causait l'erreur)
+pct_dept_cols <- names(agg_dept)[str_detect(names(agg_dept), "^Pct_")]
+
 X <- agg_dept %>%
  select(all_of(pct_dept_cols)) %>%
  mutate(across(everything(), as.numeric)) %>%
+ # Gestion des NA éventuels (remplacement par la moyenne de la colonne)
  mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm=TRUE), .)))
 
+# --- 2. Calcul de l'ACP ---
 res.pca <- PCA(X, scale.unit = TRUE, graph = FALSE)
 pc_scores <- res.pca$ind$coord
 
-# Valeurs clés ACP (pour interprétation inline)
+# --- 3. Extraction des métriques pour le texte ---
 pc1 <- round(res.pca$eig[1,2], 1)
 pc2 <- round(res.pca$eig[2,2], 1)
 pc12_cum <- round(sum(res.pca$eig[1:2,2]), 1)
@@ -176,38 +269,51 @@ pc12_cum <- round(sum(res.pca$eig[1:2,2]), 1)
 top_var_pc1 <- names(sort(res.pca$var$contrib[,1], decreasing = TRUE))[1:5]
 top_var_pc2 <- names(sort(res.pca$var$contrib[,2], decreasing = TRUE))[1:5]
 
-# --- Création d'une table de renommage pour l'interprétation ---
-var_labels <- c(
-    "Pct_%Exp.Vot" = "Exprimés/Votants",
-    "Pct_%Nuls.Vot" = "Nuls/Votants",
-    "Pct_%Abs.Ins" = "Abstention/Inscrits",
-    "Pct_%Vot.Ins" = "Votants/Inscrits",
-    "Pct_%Blancs.Ins" = "Blancs/Inscrits"
-    # Ajoutez ici tous les pourcentages de candidats si nécessaire
+# --- 4. Gestion intelligente des libellés ---
+# Dictionnaire de renommage pour les variables techniques
+custom_labels <- c(
+    "Pct_%Exp.Vot" = "Taux Expression",
+    "Pct_%Nuls.Vot" = "Votes Nuls",
+    "Pct_%Abs.Ins" = "Abstention",
+    "Pct_%Vot.Ins" = "Participation",
+    "Pct_%Blancs.Ins" = "Votes Blancs (Ins)"
 )
 
-# Renommage des variables contributives pour l'affichage
-var_contrib_pc1 <- var_labels[top_var_pc1]
-var_contrib_pc2 <- var_labels[top_var_pc2]
-# --------------------------------------------------------------------------
+# Fonction pour obtenir un nom propre (utilise le dico, sinon nettoie le nom de la colonne)
+get_label <- function(v) {
+  lbl <- custom_labels[v]
+  # Si pas dans le dico, on prend le nom de la colonne et on enlève "Pct_"
+  ifelse(is.na(lbl), str_replace(v, "Pct_", ""), lbl)
+}
 
-# Figures ACP
-p_eig <- fviz_eig(res.pca, addlabels = TRUE, main = "Variance expliquée par composante principale") 
+var_contrib_pc1 <- get_label(top_var_pc1)
+var_contrib_pc2 <- get_label(top_var_pc2)
+
+# --- 5. Figures ---
+# A. Éboulis des valeurs propres
+p_eig <- fviz_eig(res.pca, addlabels = TRUE, main = "Variance expliquée par axe") 
+
+# B. Cercle des corrélations
 p_var <- fviz_pca_var(res.pca, col.var = "contrib", repel = TRUE, 
                       gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-                      title = "Cercle des corrélations (Contribution des variables)") 
-p_ind <- fviz_pca_ind(res.pca, label = "all", repel = TRUE, title = "Projection des départements (Individus)")
+                      title = "Cercle des corrélations") 
+
+# C. Projection des individus (Départements)
+p_ind <- fviz_pca_ind(res.pca, 
+                      geom = "text", # Uniquement du texte pour lisibilité
+                      labelsize = 3,
+                      repel = TRUE, 
+                      title = "Carte factorielle des départements")
  
-# Affichage des figures
+# Affichage
 print(p_eig)
 print(p_var)
 print(p_ind)
  
-# Sauvegarde des figures ACP
+# Sauvegarde
 ggsave("pca_eboulis.png", plot = p_eig, width = 8, height = 5)
 ggsave("pca_variables.png", plot = p_var, width = 8, height = 5)
 ggsave("pca_individus.png", plot = p_ind, width = 8, height = 5)
-
 ```
 
 ### Interprétation (ACP)
@@ -229,7 +335,7 @@ Il est principalement porté par les variables **`r var_contrib_pc2[1]`** et **`
 
 -----
   
-# 5\. Classification non supervisée
+# Classification non supervisée
   
   La classification est basée sur les **4 premières composantes principales**.
 
@@ -273,30 +379,39 @@ knitr::kable(table(Cluster_Kmeans = agg_dept$cluster_km, Cluster_CAH = agg_dept$
 
 -----
   
-  # 6\. Carte choroplèthe
+# Carte choroplèthe
   
   **Question de recherche :** Quel est le taux d'abstention par département au premier tour de l'élection présidentielle 2017 ?
 
 Cette carte permet d'identifier la **géographie de la participation électorale** et de visualiser les départements où l'abstention est la plus forte ou la plus faible.
 
 ```{r map}
+# 1. Chargement du fond de carte
 shp_path <- "departements.geojson"
-
 dep_sf <- st_read(shp_path, quiet = TRUE)
-agg_join <- agg_dept %>% mutate(Code_num = as.character(!!sym(dept_code_col)))
 
-# Harmonisation du code département pour le join
+# 2. Préparation des données pour la jointure
+# On récupère le nom de la colonne code département (c'est la 1ère colonne de notre tableau agrégé)
+col_dep_code <- names(agg_dept)[1] 
+
+# On crée une colonne de jointure en format texte pour être sûr que ça matche avec le GeoJSON
+agg_join <- agg_dept %>% 
+  mutate(Code_num = as.character(!!sym(col_dep_code)))
+
+# 3. Harmonisation du code département dans le GeoJSON
+# (Gère les codes INSEE qui peuvent être dans 'code' ou 'INSEE_DEP')
 dep_sf <- dep_sf %>%
   mutate(code_dep = as.character(
     ifelse(!is.na(code), code,
            ifelse(!is.na(INSEE_DEP), INSEE_DEP, NA))))
 
-# Créer la carte d'abstention
+# 4. Jointure (Fond de carte + Données électorales)
 dep_map <- dep_sf %>%
   left_join(agg_join, by = c("code_dep" = "Code_num"))
 
-# Carte de l'abstention
-col_abst <- "Pct_%Abs.Ins"
+# 5. Création de la carte
+col_abst <- "Pct_%Abs.Ins" # La variable d'abstention créée en section 2
+
 p_map <- ggplot(dep_map) +
   geom_sf(aes(fill = !!sym(col_abst)), color = "white", size = 0.2) +
   scale_fill_gradient2(low = "green", mid = "yellow", high = "red", 
@@ -313,13 +428,13 @@ p_map <- ggplot(dep_map) +
         axis.text = element_blank(),
         axis.ticks = element_blank())
 
-# Affichage de la carte
+# Affichage
 print(p_map)
 
-# Sauvegarde de la carte
+# Sauvegarde
 ggsave("carte_abstention.png", plot = p_map, width = 10, height = 8, dpi = 300)
 
-# Statistiques sur l'abstention
+# 6. Tableau récapitulatif des statistiques
 stats_abstention <- dep_map %>%
   st_drop_geometry() %>%
   filter(!is.na(!!sym(col_abst))) %>%
@@ -336,7 +451,7 @@ knitr::kable(stats_abstention,
 
 -----
   
-# 7\. Conclusion
+# Conclusion
   
 Synthèse des Principaux Résultats
 Ce projet d'exploration des données électorales du premier tour de l'élection présidentielle de 2017, agrégées au niveau départemental, a permis d'atteindre les objectifs fixés :
@@ -366,7 +481,7 @@ Méthodes Alternatives : Si des variables catégorielles (ex. statut urbain/rura
 
 -----
 
-# 8\. Annexes
+# Annexes
 
   * Fichier `.Rmd` : code source utilisé.
   * Fichiers produits : Figures PNG sauvegardées dans le répertoire de travail.
