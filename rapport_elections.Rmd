@@ -25,6 +25,7 @@ library(cluster)
 library(sf)
 library(ggplot2)
 library(knitr)
+library(glue)
                                            
 set.seed(123)
 ```
@@ -174,6 +175,20 @@ pc12_cum <- round(sum(res.pca$eig[1:2,2]), 1)
  
 top_var_pc1 <- names(sort(res.pca$var$contrib[,1], decreasing = TRUE))[1:5]
 top_var_pc2 <- names(sort(res.pca$var$contrib[,2], decreasing = TRUE))[1:5]
+
+# --- Création d'une table de renommage pour l'interprétation ---
+var_labels <- c(
+    "Pct_%Exp.Vot" = "Exprimés/Votants",
+    "Pct_%Nuls.Vot" = "Nuls/Votants",
+    "Pct_%Abs.Ins" = "Abstention/Inscrits",
+    "Pct_%Vot.Ins" = "Votants/Inscrits",
+    "Pct_%Blancs.Ins" = "Blancs/Inscrits"
+    # Ajoutez ici tous les pourcentages de candidats si nécessaire
+)
+
+# Renommage des variables contributives pour l'affichage
+var_contrib_pc1 <- var_labels[top_var_pc1]
+var_contrib_pc2 <- var_labels[top_var_pc2]
 # --------------------------------------------------------------------------
 
 # Figures ACP
@@ -195,19 +210,21 @@ ggsave("pca_individus.png", plot = p_ind, width = 8, height = 5)
 
 ```
 
-**Interprétation (ACP)**
-L’ACP normée a été réalisée sur les pourcentages départementaux. Les deux premiers axes expliquent ensemble r pc12_cum% de l’inertie (PC1 = r pc1%, PC2 = r pc2%).
+### Interprétation (ACP)
 
-Axe 1 (PC1) : L'opposition Structurelle
-PC1 est l'axe majeur. Il oppose typiquement les départements où les variables r top_var_pc1[1] et r top_var_pc1[2] sont fortes à ceux où r top_var_pc1[4] et r top_var_pc1[5] dominent. L'interprétation classique est l'opposition Système vs. Anti-Système et/ou Vote de Mobilisation vs. Abstention/Vote Protestataire.
+L’ACP normée a été réalisée sur les pourcentages départementaux. Les deux premiers axes expliquent ensemble **`r pc12_cum`%** de l’inertie (PC1 = **`r pc1`%**, PC2 = **`r pc2`%**).
 
-Conclusion : Cet axe résume la fracture électorale historique, polarisant le territoire entre les régions participant à la dynamique du scrutin et celles exprimant un rejet ou une distance.
+**Axe 1 (PC1) : L'opposition Structurelle**
 
-Axe 2 (PC2) : La Clivage Résiduel
+PC1 est l'axe majeur. Il oppose typiquement les départements où les variables **`r var_contrib_pc1[1]`** et **`r var_contrib_pc1[2]`** sont fortes à ceux où **`r var_contrib_pc1[4]`** et **`r var_contrib_pc1[5]`** dominent. L'interprétation classique est l'opposition Système vs. Anti-Système et/ou Vote de Mobilisation vs. Abstention/Vote Protestataire.
+
+Conclusion : Cet axe résume la **fracture électorale historique**, polarisant le territoire entre les régions participant à la dynamique du scrutin et celles exprimant un rejet ou une distance.
+
+**Axe 2 (PC2) : La Clivage Résiduel**
+
 PC2 est indépendant du premier et met en évidence la distinction restante.
 
-Il est principalement porté par les variables r top_var_pc2[1] et r top_var_pc2[2]. L'interprétation classique est le clivage Gauche Radicale/Protestataire (si Mélenchon/Hamon dominent un côté) vs. Droite Modérée/Conservatrice (si Fillon/Dupont-Aignan dominent l'autre côté).
-
+Il est principalement porté par les variables **`r var_contrib_pc2[1]`** et **`r var_contrib_pc2[2]`**. L'interprétation classique est le clivage Gauche Radicale/Protestataire (si Mélenchon/Hamon dominent un côté) vs. Droite Modérée/Conservatrice (si Fillon/Dupont-Aignan dominent l'autre côté).
 
 
 -----
@@ -258,7 +275,9 @@ knitr::kable(table(Cluster_Kmeans = agg_dept$cluster_km, Cluster_CAH = agg_dept$
   
   # 6\. Carte choroplèthe
   
-  Visualisation géographique des clusters identifiés par la méthode K-means.
+  **Question de recherche :** Quel est le taux d'abstention par département au premier tour de l'élection présidentielle 2017 ?
+
+Cette carte permet d'identifier la **géographie de la participation électorale** et de visualiser les départements où l'abstention est la plus forte ou la plus faible.
 
 ```{r map}
 shp_path <- "departements.geojson"
@@ -267,27 +286,52 @@ dep_sf <- st_read(shp_path, quiet = TRUE)
 agg_join <- agg_dept %>% mutate(Code_num = as.character(!!sym(dept_code_col)))
 
 # Harmonisation du code département pour le join
-dep_sf <- dep_sf %>% 
+dep_sf <- dep_sf %>%
   mutate(code_dep = as.character(
-    ifelse(!is.na(code), code, 
-           ifelse(!is.na(INSEE_DEP), INSEE_DEP, NA)))) 
+    ifelse(!is.na(code), code,
+           ifelse(!is.na(INSEE_DEP), INSEE_DEP, NA))))
 
-dep_map <- dep_sf %>% 
-  left_join(agg_join, by = c("code_dep" = "Code_num")) %>%
-  filter(!is.na(cluster_km)) 
+# Créer la carte d'abstention
+dep_map <- dep_sf %>%
+  left_join(agg_join, by = c("code_dep" = "Code_num"))
 
+# Carte de l'abstention
+col_abst <- "Pct_%Abs.Ins"
 p_map <- ggplot(dep_map) +
-  geom_sf(aes(fill = factor(cluster_km)), color = "grey40", size = 0.1) +
-  scale_fill_brewer(type = "qual", palette = "Set2", na.value = "grey90", name = "Cluster K-means") +
-  labs(title = "Clusters électoraux — 1er tour 2017 (par département)") +
+  geom_sf(aes(fill = !!sym(col_abst)), color = "white", size = 0.2) +
+  scale_fill_gradient2(low = "green", mid = "yellow", high = "red", 
+                       midpoint = median(dep_map[[col_abst]], na.rm = TRUE),
+                       na.value = "grey90",
+                       name = "Abstention\n(%)") +
+  labs(title = "Taux d'abstention par département — 1er tour 2017",
+       subtitle = "Pourcentage d'abstention parmi les inscrits",
+       caption = "Source : Données électorales 2017") +
   theme_minimal() +
-  theme(legend.position = "bottom")
+  theme(legend.position = "right",
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 10),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
 
 # Affichage de la carte
 print(p_map)
 
 # Sauvegarde de la carte
-ggsave("carte_clusters.png", plot = p_map, width = 8, height = 8)
+ggsave("carte_abstention.png", plot = p_map, width = 10, height = 8, dpi = 300)
+
+# Statistiques sur l'abstention
+stats_abstention <- dep_map %>%
+  st_drop_geometry() %>%
+  filter(!is.na(!!sym(col_abst))) %>%
+  summarise(
+    Moyenne = round(mean(!!sym(col_abst), na.rm = TRUE), 2),
+    Mediane = round(median(!!sym(col_abst), na.rm = TRUE), 2),
+    Min = round(min(!!sym(col_abst), na.rm = TRUE), 2),
+    Max = round(max(!!sym(col_abst), na.rm = TRUE), 2)
+  )
+
+knitr::kable(stats_abstention, 
+             caption = "Statistiques sur l'abstention par département")
 ```
 
 -----
@@ -297,7 +341,7 @@ ggsave("carte_clusters.png", plot = p_map, width = 8, height = 8)
 Synthèse des Principaux Résultats
 Ce projet d'exploration des données électorales du premier tour de l'élection présidentielle de 2017, agrégées au niveau départemental, a permis d'atteindre les objectifs fixés :
 
-Synthèse ACP : L'Analyse en Composantes Principales (ACP) a réussi à réduire la complexité des données. Les deux premiers axes principaux (PC1 et PC2) expliquent conjointement r pc12_cum% de la variance totale des pourcentages de vote départementaux. Ces axes capturent les grandes lignes de l'opposition électorale française : l'opposition structurante Système/Anti-Système (PC1) et le clivage Résiduel Gauche/Droite (PC2).
+Synthèse ACP : L'Analyse en Composantes Principales (ACP) a réussi à réduire la complexité des données. Les deux premiers axes principaux (PC1 et PC2) expliquent conjointement **`r pc12_cum`%** de la variance totale des pourcentages de vote départementaux. Ces axes capturent les grandes lignes de l'opposition électorale française : l'opposition structurante Système/Anti-Système (PC1) et le clivage Résiduel Gauche/Droite (PC2).
 
 Synthèse Classification : La classification non supervisée par K-means a identifié r best_k profils départementaux distincts (Tableau 1). Cette typologie fournit une cartographie des comportements électoraux français, révélant des groupes homogènes (par exemple, des départements à forte abstention, à forte concentration centriste, ou fortement orientés vers les extrêmes).
 
@@ -307,7 +351,7 @@ Limites du Projet et Perspectives
 Limites
 L'analyse présentée est sujette à plusieurs limites inhérentes au jeu de données et à la méthodologie :
 
-Agrégation Départementale : L'utilisation de données agrégées au niveau départemental entraîne une perte de détail communal et masque l'hétérogénéité interne des grands départements (effet de moyenne).
+Agrégation Départementale : L'utilisation de données agrégées au niveau départemental entraîne une perte de détail sur le plan communal et masque l'hétérogénéité interne des grands départements (l'effet de moyenne).
 
 Variables Explicatives Manquantes : L'interprétation est purement électorale. L'absence d'intégration de variables socio-économiques externes (âge, diplôme, revenu, taux de chômage, etc.) limite la capacité à expliquer les causes profondes de la formation des clusters.
 
